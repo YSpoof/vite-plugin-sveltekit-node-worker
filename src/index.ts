@@ -9,7 +9,6 @@ const NODE_WORKER_PREFIX = "\0node-worker:";
 type PendingWorker = {
   source: Uint8Array;
   assetName: string;
-  importerStems: Set<string>;
 };
 
 function hasNodeWorkerQuery(id: string): boolean {
@@ -20,16 +19,6 @@ function hasNodeWorkerQuery(id: string): boolean {
 
 function workerAssetName(entryPath: string): string {
   return `${path.basename(entryPath, path.extname(entryPath))}.node-worker.js`;
-}
-
-function importerStem(importer: string | undefined): string | null {
-  if (!importer) return null;
-  const clean = importer.split("?")[0];
-  return path.basename(clean, path.extname(clean));
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function firstExistingFile(candidates: string[]): string | null {
@@ -214,6 +203,16 @@ function findFiles(dir: string, pattern: RegExp): string[] {
   return results;
 }
 
+function placeWorkerBesideReferencers(root: string, worker: PendingWorker) {
+  if (!fs.existsSync(root)) return;
+
+  for (const file of findFiles(root, /\.js$/)) {
+    if (file.endsWith(worker.assetName)) continue;
+    if (!fs.readFileSync(file, "utf8").includes(worker.assetName)) continue;
+    writeWorkerAsset(path.dirname(file), worker.assetName, worker.source);
+  }
+}
+
 function workerClassSource(imports: string, workerUrlExpr: string): string {
   return `${imports}
 
@@ -227,150 +226,146 @@ export default class extends NodeWorker {
 `;
 }
 
-function findImporterChunks(tree: string, stems: Set<string>): string[] {
-  const matches: string[] = [];
-  for (const stem of stems) {
-    const pattern = new RegExp(`^${escapeRegex(stem)}\\.js-[^/]+\\.js$`);
-    for (const file of findFiles(tree, pattern)) {
-      if (!file.includes(".remote")) matches.push(file);
-    }
-  }
-  return matches;
+function isServerEnvironment(environment: { config: { consumer: string } }): boolean {
+  return environment.config.consumer === "server";
 }
 
-function placeWorkerInBuildOutput(pendingWorker: PendingWorker) {
-  const trees = [
-    { root: path.resolve("build/server"), alwaysFallback: true },
-    { root: path.resolve(".svelte-kit/output/server"), alwaysFallback: false },
-  ];
-
-  for (const { root, alwaysFallback } of trees) {
-    const chunks = findImporterChunks(root, pendingWorker.importerStems);
-    if (chunks.length) {
-      for (const chunk of chunks) {
-        writeWorkerAsset(path.dirname(chunk), pendingWorker.assetName, pendingWorker.source);
-      }
-      continue;
-    }
-
-    const chunksDir = path.join(root, "chunks");
-    if (alwaysFallback || fs.existsSync(chunksDir)) {
-      writeWorkerAsset(chunksDir, pendingWorker.assetName, pendingWorker.source);
-    }
-  }
-}
-
-export function sveltekitNodeWorker(): Plugin {
+export function sveltekitNodeWorker(options: { out?: string } = {}): Plugin[] {
   let isDev = false;
-  let isServer = false;
   let devOutDir = "";
   const watchedEntries = new Set<string>();
-  const importerStems = new Map<string, Set<string>>();
   const pendingWorkers = new Map<string, PendingWorker>();
   const projectRoot = process.cwd();
+  const adapterOut = path.resolve(options.out ?? "build");
 
-  const buildWorker = async (entryPath: string, out: string) => {
-    fs.mkdirSync(path.dirname(out), { recursive: true });
-    await build(workerBuildOptions(projectRoot, [entryPath], out, isDev));
+  const buildWorker = async (entryPath: string, outfile: string) => {
+    fs.mkdirSync(path.dirname(outfile), { recursive: true });
+    await build(workerBuildOptions(projectRoot, [entryPath], outfile, isDev));
   };
 
-  return {
-    name: "vite-plugin-sveltekit-node-worker",
-    enforce: "pre",
-    configResolved(config) {
-      isDev = config.command === "serve";
-      isServer = !!config.build.ssr;
-      devOutDir = path.resolve(".svelte-kit/node-workers");
-    },
-    async resolveId(id, importer, options) {
-      if (!hasNodeWorkerQuery(id)) return null;
+  const copyWorkersAfterAdapter = () => {
+    if (isDev || pendingWorkers.size === 0) return;
+    for (const worker of pendingWorkers.values()) {
+      placeWorkerBesideReferencers(adapterOut, worker);
+    }
+  };
 
-      const cleanId = id.split("?")[0];
-      const resolved = await this.resolve(cleanId, importer, { ...options, skipSelf: true });
-      if (!resolved) return null;
+  return [
+    {
+      name: "vite-plugin-sveltekit-node-worker",
+      enforce: "pre",
+      configResolved(config) {
+        isDev = config.command === "serve";
+        devOutDir = path.resolve(".svelte-kit/node-workers");
+      },
+      async resolveId(id, importer, options) {
+        if (!hasNodeWorkerQuery(id)) return null;
 
-      const resolvedId = typeof resolved === "string" ? resolved : resolved.id;
-      const entryPath = path.resolve(resolvedId);
-      watchedEntries.add(entryPath);
+        const cleanId = id.split("?")[0];
+        const resolved = await this.resolve(cleanId, importer, { ...options, skipSelf: true });
+        if (!resolved) return null;
 
-      const stem = importerStem(importer);
-      if (stem) {
-        let stems = importerStems.get(entryPath);
-        if (!stems) {
-          stems = new Set();
-          importerStems.set(entryPath, stems);
+        const resolvedId = typeof resolved === "string" ? resolved : resolved.id;
+        watchedEntries.add(path.resolve(resolvedId));
+        return `${NODE_WORKER_PREFIX}${resolvedId}`;
+      },
+      async handleHotUpdate({ file, server }) {
+        const envPath = envFilePath(projectRoot);
+        const envChanged = envPath !== null && path.resolve(file) === path.resolve(envPath);
+        if (!watchedEntries.has(file) && !envChanged) return;
+
+        let rebuilt = false;
+        for (const entryPath of watchedEntries) {
+          if (!envChanged && file !== entryPath) continue;
+          await buildWorker(entryPath, path.join(devOutDir, workerAssetName(entryPath)));
+          rebuilt = true;
         }
-        stems.add(stem);
-      }
+        if (rebuilt) server.ws.send({ type: "full-reload" });
+      },
+      async load(id) {
+        if (!id.startsWith(NODE_WORKER_PREFIX)) return null;
 
-      return `${NODE_WORKER_PREFIX}${resolvedId}`;
-    },
-    async handleHotUpdate({ file, server }) {
-      const envPath = envFilePath(projectRoot);
-      const envChanged = envPath !== null && path.resolve(file) === path.resolve(envPath);
-      if (!watchedEntries.has(file) && !envChanged) return;
+        const envPath = envFilePath(projectRoot);
+        if (envPath) this.addWatchFile(envPath);
 
-      let rebuilt = false;
-      for (const entryPath of watchedEntries) {
-        if (!envChanged && file !== entryPath) continue;
-        await buildWorker(entryPath, path.join(devOutDir, workerAssetName(entryPath)));
-        rebuilt = true;
-      }
-      if (rebuilt) server.ws.send({ type: "full-reload" });
-    },
-    async load(id) {
-      if (!id.startsWith(NODE_WORKER_PREFIX)) return null;
+        const entryPath = id.slice(NODE_WORKER_PREFIX.length);
+        const assetName = workerAssetName(entryPath);
 
-      const envPath = envFilePath(projectRoot);
-      if (envPath) this.addWatchFile(envPath);
+        if (!isServerEnvironment(this.environment)) {
+          return `export default null;`;
+        }
 
-      const entryPath = id.slice(NODE_WORKER_PREFIX.length);
-      const assetName = workerAssetName(entryPath);
+        if (isDev) {
+          const workerPath = path.join(devOutDir, assetName);
+          await buildWorker(entryPath, workerPath);
+          const escapedPath = workerPath.replace(/\\/g, "\\\\");
+          return workerClassSource(
+            `import { Worker as NodeWorker } from "node:worker_threads";
+import { pathToFileURL } from "node:url";`,
+            `pathToFileURL("${escapedPath}")`,
+          );
+        }
 
-      if (!isServer && !isDev) {
-        return `export default null;`;
-      }
+        const result = await build(workerBuildOptions(projectRoot, [entryPath], false, isDev));
+        const output = result.outputFiles?.[0];
+        if (!output) {
+          throw new Error("Worker build produced no output");
+        }
 
-      if (isDev) {
-        const workerPath = path.join(devOutDir, assetName);
-        await buildWorker(entryPath, workerPath);
-        const escapedPath = workerPath.replace(/\\/g, "\\\\");
+        pendingWorkers.set(entryPath, {
+          source: output.contents,
+          assetName,
+        });
+
         return workerClassSource(
           `import { Worker as NodeWorker } from "node:worker_threads";
-import { pathToFileURL } from "node:url";`,
-          `pathToFileURL("${escapedPath}")`,
-        );
-      }
-
-      const result = await build(workerBuildOptions(projectRoot, [entryPath], false, isDev));
-      const output = result.outputFiles?.[0];
-      if (!output) {
-        throw new Error("Worker build produced no output");
-      }
-
-      pendingWorkers.set(entryPath, {
-        source: output.contents,
-        assetName,
-        importerStems: importerStems.get(path.resolve(entryPath)) ?? new Set(),
-      });
-
-      return workerClassSource(
-        `import { Worker as NodeWorker } from "node:worker_threads";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import path from "node:path";`,
-        `pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "${assetName}"))`,
-      );
-    },
-    closeBundle: {
-      sequential: true,
-      order: "post",
-      async handler() {
-        if (isDev || pendingWorkers.size === 0) return;
-        for (const worker of pendingWorkers.values()) {
-          placeWorkerInBuildOutput(worker);
-        }
-        pendingWorkers.clear();
+          `pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "${assetName}"))`,
+        );
+      },
+      writeBundle: {
+        sequential: true,
+        order: "post",
+        handler(options, bundle) {
+          if (isDev || pendingWorkers.size === 0) return;
+          if (this.environment && !isServerEnvironment(this.environment)) return;
+          const outDir = options.dir;
+          if (!outDir) return;
+
+          for (const [fileName, item] of Object.entries(bundle)) {
+            if (item.type !== "chunk") continue;
+            const ids = item.moduleIds ?? Object.keys(item.modules);
+            const matched = new Set<PendingWorker>();
+
+            for (const moduleId of ids) {
+              const prefixAt = moduleId.indexOf("node-worker:");
+              if (prefixAt === -1) continue;
+              const pending = pendingWorkers.get(moduleId.slice(prefixAt + "node-worker:".length));
+              if (pending) matched.add(pending);
+            }
+
+            for (const pending of pendingWorkers.values()) {
+              if (item.code.includes(pending.assetName)) matched.add(pending);
+            }
+
+            for (const pending of matched) {
+              writeWorkerAsset(path.join(outDir, path.dirname(fileName)), pending.assetName, pending.source);
+            }
+          }
+        },
       },
     },
-  };
+    {
+      name: "vite-plugin-sveltekit-node-worker-copy",
+      enforce: "post",
+      apply: "build",
+      buildApp: {
+        order: "post",
+        async handler() {
+          copyWorkersAfterAdapter();
+        },
+      },
+    },
+  ];
 }

@@ -29,6 +29,12 @@ export default defineConfig({
 });
 ```
 
+Match `adapter-node`'s `out` if you change it:
+
+```ts
+sveltekitNodeWorker({ out: "dist" })
+```
+
 Write a worker, then import it with `?nodeWorker`:
 
 ```ts
@@ -68,7 +74,7 @@ Worker source can import:
 
 **Dev** (`vite dev`): workers build to `.svelte-kit/node-workers` and spawn from that path. Changing a worker file or `src/env` rebuilds and full-reloads.
 
-**Production** (`vite build` + `adapter-node`): the worker file is written next to the server chunk that imported it (so `import.meta.url` resolves). If that chunk cannot be found, it falls back to `build/server/chunks` and `.svelte-kit/output/server/chunks` when those dirs exist.
+**Production** (`vite build` + `adapter-node`): the worker file is written next to the SSR chunk that imported it. After the adapter re-bundles, the plugin copies it beside any server chunk that references it under `out` (default `build`).
 
 ## Source Code
 Since this plugin is MIT licensed, you can also contribute to it at it's repo on [GitHub](https://github.com/YSpoof/vite-plugin-sveltekit-node-worker)
