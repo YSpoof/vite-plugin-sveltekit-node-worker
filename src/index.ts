@@ -350,7 +350,11 @@ import path from "node:path";`,
             }
 
             for (const pending of matched) {
-              writeWorkerAsset(path.join(outDir, path.dirname(fileName)), pending.assetName, pending.source);
+              writeWorkerAsset(
+                path.join(outDir, path.dirname(fileName)),
+                pending.assetName,
+                pending.source,
+              );
             }
           }
         },

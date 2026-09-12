@@ -7,8 +7,8 @@
     "strict": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
+    "isolatedDeclarations": true,
     "declaration": true,
-    "emitDeclarationOnly": true,
     "rootDir": "src",
     "outDir": "dist"
   },
