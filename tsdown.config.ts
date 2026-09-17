@@ -6,5 +6,9 @@ export default defineConfig({
   dts: true,
   clean: true,
   minify: true,
-  external: ["vite", "esbuild"],
+  fixedExtension: true,
+  exports: true,
+  deps: {
+    neverBundle: ["vite", "esbuild"],
+  },
 });
