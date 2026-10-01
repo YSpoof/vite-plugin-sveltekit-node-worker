@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-sveltekit-node-worker",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Vite plugin for Node.js worker_threads in SvelteKit 3 with adapter-node.",
   "keywords": [
     "adapter-node",
@@ -32,21 +32,21 @@
     "esbuild": "^0.28.2"
   },
   "devDependencies": {
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.3",
     "tsdown": "^0.23.0",
-    "vite": "^8.3.0"
+    "vite": "^8.3.1"
   },
   "peerDependencies": {
-    "@sveltejs/adapter-node": "^6.0.0-next.0",
-    "@sveltejs/kit": "^3.0.0-next.0",
+    "@sveltejs/adapter-node": "^6.0.0",
+    "@sveltejs/kit": "^3.0.0",
     "vite": "^8.0.12"
   },
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "12.4.1",
+      "version": "12.8.1",
       "onFail": "ignore"
     }
   },
-  "packageManager": "pnpm@12.4.1"
+  "packageManager": "pnpm@12.8.1"
 }
